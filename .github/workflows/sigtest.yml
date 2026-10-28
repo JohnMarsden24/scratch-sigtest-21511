@@ -1,0 +1,39 @@
+name: sigtest
+on: workflow_dispatch
+permissions:
+  contents: write
+  pull-requests: write
+jobs:
+  t:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+    steps:
+      - name: run
+        run: |
+          set +e
+          v(){ jq -c '{sha:.sha,parents:[.parents[].sha],author:.author.name,committer:.committer.name,verified:.verification.verified,reason:.verification.reason}'; }
+          echo "== update-branch on conflicting PR 1"; gh api -X PUT repos/$REPO/pulls/1/update-branch -i 2>&1 | grep -E '^HTTP|message'
+          echo "== merges conflict"; gh api -X POST repos/$REPO/merges -f base=feature -f head=main 2>&1 | head -3
+          MAIN=$(gh api repos/$REPO/git/ref/heads/main --jq .object.sha)
+          FEAT=$(gh api repos/$REPO/git/ref/heads/feature --jq .object.sha)
+          BL=$(gh api repos/$REPO/git/blobs -f content=resolved-line -f encoding=utf-8 --jq .sha)
+          FT=$(gh api repos/$REPO/git/commits/$FEAT --jq .tree.sha)
+          TREE=$(gh api repos/$REPO/git/trees -f base_tree=$FT -f 'tree[][path]=f.txt' -f 'tree[][mode]=100644' -f 'tree[][type]=blob' -f "tree[][sha]=$BL" --jq .sha)
+          echo "== A: GITHUB_TOKEN two-parent commit, author/committer omitted"
+          A=$(gh api repos/$REPO/git/commits -f message="Merge main into feature (A)" -f tree=$TREE -f "parents[]=$FEAT" -f "parents[]=$MAIN")
+          echo "$A" | v
+          echo "== B: explicit author/committer github-actions[bot]"
+          B=$(gh api repos/$REPO/git/commits -f message="Merge main into feature (B)" -f tree=$TREE -f "parents[]=$FEAT" -f "parents[]=$MAIN" -f author[name]='github-actions[bot]' -f author[email]='41898282+github-actions[bot]@users.noreply.github.com' -f committer[name]='github-actions[bot]' -f committer[email]='41898282+github-actions[bot]@users.noreply.github.com')
+          echo "$B" | v
+          echo "== C: single-parent commit, omitted author"
+          gh api repos/$REPO/git/commits -f message="single C" -f tree=$FT -f "parents[]=$FEAT" | v
+          ASHA=$(echo "$A" | jq -r .sha)
+          echo "== PATCH ref feature -> A (force=false)"
+          gh api -X PATCH repos/$REPO/git/refs/heads/feature -f sha=$ASHA -F force=false 2>&1 | head -3
+          echo "== PR1 state after"; sleep 5; gh api repos/$REPO/pulls/1 --jq '{mergeable,mergeable_state}'
+          gh api repos/$REPO/commits/feature --jq '{sha,verified:.commit.verification.verified,parents:[.parents[].sha]}'
+          echo "== update-branch on clean PR 2"; gh api -X PUT repos/$REPO/pulls/2/update-branch -i 2>&1 | grep -E '^HTTP|message'
+          sleep 8
+          echo "== PR2 head after update-branch"; gh api repos/$REPO/commits/clean --jq '{sha,verified:.commit.verification.verified,reason:.commit.verification.reason,committer:.commit.committer.name,parents:[.parents[].sha]}'
