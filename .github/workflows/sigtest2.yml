@@ -1,0 +1,40 @@
+name: sigtest2
+on: workflow_dispatch
+permissions:
+  contents: write
+  pull-requests: write
+jobs:
+  t:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+    steps:
+      - name: run
+        run: |
+          set +e
+          M0=dab732c67fd2891df1349e5011d53701c14bebd7
+          T0=$(gh api repos/$REPO/git/commits/$M0 --jq .tree.sha)
+          v(){ jq -c '{sha:.sha,parents:[.parents[].sha],author:.author.name,committer:.committer.name,verified:.verification.verified,reason:.verification.reason}'; }
+          mk(){ # file content parent msg
+            BL=$(gh api repos/$REPO/git/blobs -f content="$2" -f encoding=utf-8 --jq .sha)
+            TR=$(gh api repos/$REPO/git/trees -f base_tree=$T0 -f "tree[][path]=$1" -f 'tree[][mode]=100644' -f 'tree[][type]=blob' -f "tree[][sha]=$BL" --jq .sha)
+            gh api repos/$REPO/git/commits -f message="$4" -f tree=$TR -f "parents[]=$3" --jq .sha
+          }
+          X=$(mk f.txt main-line $M0 "main2 change"); Y=$(mk f.txt feature-line $M0 "feature2 change")
+          Z=$(mk g.txt g $M0 "clean2 change"); W=$(mk h.txt h $M0 "clean3 change")
+          for p in "main2 $X" "feature2 $Y" "clean2 $Z" "clean3 $W"; do set -- $p; gh api repos/$REPO/git/refs -f ref=refs/heads/$1 -f sha=$2 --jq .ref; done
+          gh pr create -H feature2 -B main2 -t conflict2 -b x 2>&1 | tail -1
+          gh pr create -H clean2 -B main2 -t clean2 -b x 2>&1 | tail -1
+          echo "== update-branch clean PR (clean2)"; gh api -X PUT repos/$REPO/pulls/4/update-branch -i 2>&1 | grep -E '^HTTP|message'
+          sleep 8; gh api repos/$REPO/commits/clean2 --jq '{sha,verified:.commit.verification.verified,reason:.commit.verification.reason,author:.commit.author.name,committer:.commit.committer.name,parents:[.parents[].sha]}'
+          echo "== POST /merges base=clean3 head=main2"; gh api -X POST repos/$REPO/merges -f base=clean3 -f head=main2 --jq '{sha,verified:.commit.verification.verified,reason:.commit.verification.reason,committer:.commit.committer.name,parents:[.parents[].sha]}' 2>&1 | head -3
+          echo "== two-parent API commit on conflict branch, GITHUB_TOKEN"
+          FT=$(gh api repos/$REPO/git/commits/$Y --jq .tree.sha)
+          BL=$(gh api repos/$REPO/git/blobs -f content=resolved-line -f encoding=utf-8 --jq .sha)
+          TREE=$(gh api repos/$REPO/git/trees -f base_tree=$FT -f 'tree[][path]=f.txt' -f 'tree[][mode]=100644' -f 'tree[][type]=blob' -f "tree[][sha]=$BL" --jq .sha)
+          A=$(gh api repos/$REPO/git/commits -f message="Merge main2 into feature2" -f tree=$TREE -f "parents[]=$Y" -f "parents[]=$X")
+          echo "$A" | v
+          echo "== PATCH ref feature2 -> merge commit (force=false)"
+          gh api -X PATCH repos/$REPO/git/refs/heads/feature2 -f sha=$(echo "$A" | jq -r .sha) -F force=false --jq '{ref,sha:.object.sha}' 2>&1 | head -3
+          sleep 6; gh api repos/$REPO/pulls/3 --jq '{mergeable,mergeable_state}'
